@@ -34,7 +34,7 @@ from articulate.math import RotationRepresentation
 
 
 # ===========================================================================
-# Dataset (reused from conditional model)
+# Dataset
 # ===========================================================================
 
 class PoseDataset(Dataset):

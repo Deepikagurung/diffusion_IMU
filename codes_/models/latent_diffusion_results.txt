@@ -1,0 +1,20 @@
+VAE: vae_best.pth | Denoiser: latent_denoiser_best.pth
+============================================================
+Noise level (t)   : 50
+Samples evaluated : 33280
+Mean MPJPE        : 1.17 cm
+Mean Local Angle  : 3.11°
+Mean Global Angle : 2.63°
+============================================================
+Noise level (t)   : 80
+Samples evaluated : 33280
+Mean MPJPE        : 1.34 cm
+Mean Local Angle  : 3.30°
+Mean Global Angle : 2.97°
+============================================================
+Noise level (t)   : 100
+Samples evaluated : 33280
+Mean MPJPE        : 1.45 cm
+Mean Local Angle  : 3.44°
+Mean Global Angle : 3.20°
+============================================================

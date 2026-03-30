@@ -1,0 +1,2 @@
+[LD] Final Train Loss: 0.047554 | Final Val Loss: 0.038664
+Best Val Loss: 0.038657

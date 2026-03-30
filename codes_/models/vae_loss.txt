@@ -1,0 +1,2 @@
+[AE] Final Train Loss: 0.000894 | Final Val Loss: 0.000721
+Best Val Loss: 0.000801

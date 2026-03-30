@@ -1,0 +1,4 @@
+[AE] Final Train: total=0.001154 pose=0.000651 tran=0.000005 kl=4.521670
+[AE] Final Val:   total=0.000941 pose=0.000460 tran=0.000003 kl=4.519899
+[AE] Best Val Loss: 0.001030
+[AE] tran_weight=10.0, kl_weight=0.0001

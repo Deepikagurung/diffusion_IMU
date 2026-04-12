@@ -218,7 +218,11 @@ class SimulatedIMU(nn.Module):
 def train_imu_correction(
     sim_imu_module, mp_model, dataset, device,
     num_epochs=20, lr=1e-3, save_path="imu_correction.pth",
+    reg_gravity=0.0, reg_accscale=0.0,
 ):
+    # regularisation weights (pull gravity to nominal, penalize acc log-scales)
+    reg_gravity = 0.0
+    reg_accscale = 0.0
     """Train SimulatedIMU's learnable correction to minimise MSE(corrected, real_imu).
 
     MobilePoser is frozen. Pipeline per sequence:
@@ -250,9 +254,19 @@ def train_imu_correction(
                     real_imu.unsqueeze(0), [real_imu.shape[0]]
                 )
 
-            # SimulatedIMU: physical synthesis + learnable correction
+            # SimulatedIMU: physical synthesis
             corrected = sim_imu_module(pose_pred, tran_pred)
             loss = criterion(corrected, real_imu)
+
+            # regularisation: gravity toward nominal + small penalty on acc log-scales
+            reg_loss = torch.tensor(0.0, device=device)
+            if reg_gravity != 0.0:
+                g_nom = sim_imu_module.GRAVITY.to(device)
+                g_pred = sim_imu_module.learn_gravity.to(device)
+                reg_loss = reg_loss + reg_gravity * torch.sum((g_pred - g_nom) ** 2)
+            if reg_accscale != 0.0:
+                reg_loss = reg_loss + reg_accscale * torch.sum(sim_imu_module.phys_acc_log_scale.to(device) ** 2)
+            loss = loss + reg_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -283,8 +297,10 @@ def train_simulated_imu(
     This mirrors the previous `train_imu_correction` behaviour but the name
     matches the new role: training the simulated (learnable physical) IMU.
     """
-    return train_imu_correction(sim_imu_module, mp_model, dataset, device,
-                                num_epochs=num_epochs, lr=lr, save_path=save_path)
+    return train_imu_correction(
+        sim_imu_module, mp_model, dataset, device,
+        num_epochs=num_epochs, lr=lr, save_path=save_path,
+    )
 
 
 # =====================================================================
@@ -305,6 +321,10 @@ if __name__ == "__main__":
     parser.add_argument("--sim-epochs",   type=int,   default=100)
     parser.add_argument("--sim-lr",       type=float, default=1e-3)
     parser.add_argument("--sim-hidden",   type=int,   default=128)
+    parser.add_argument("--reg-gravity-weight", type=float, default=0.0,
+                        help="L2 weight pulling learn_gravity toward nominal gravity")
+    parser.add_argument("--reg-accscale-weight", type=float, default=0.0,
+                        help="L2 weight penalizing phys_acc_log_scale magnitude")
     args = parser.parse_args()
 
     device = model_config.device
@@ -322,10 +342,12 @@ if __name__ == "__main__":
     if args.train_simulated:
         print("\n=== Training SimulatedIMU (learnable physical params) ===")
         train_dataset = PoseDataset(fold='train', finetune='dip')
-        train_simulated_imu(
+        train_imu_correction(
             sim_imu_module, mp_model, train_dataset, device,
             num_epochs=args.sim_epochs, lr=args.sim_lr,
             save_path=args.sim_checkpoint,
+            reg_gravity=args.reg_gravity_weight,
+            reg_accscale=args.reg_accscale_weight,
         )
 
     if os.path.exists(args.sim_checkpoint):
@@ -341,6 +363,9 @@ if __name__ == "__main__":
     total_rmse_mp   = 0.0   # MobilePoser-style (world frame, no gravity)
     total_rmse_corr = 0.0   # SimulatedIMU: physical + learned correction
     n_seqs = 0
+    # per-sensor/axis accumulation for accelerometer (5 sensors x 3 axes)
+    per_sensor_sum_sq = torch.zeros(5, 3)
+    total_frames = 0
 
     with torch.no_grad():
         for i, (imu, pose_gt, joint_gt, tran_gt) in enumerate(tqdm(eval_dataset, desc="Evaluating")):
@@ -362,6 +387,18 @@ if __name__ == "__main__":
             rmse_mp   = (sim_imu_mp.cpu()   - imu).pow(2).mean().sqrt().item()
             rmse_corr = (sim_imu_corr.cpu() - imu).pow(2).mean().sqrt().item()
 
+            # accumulate per-sensor/axis squared error (accelerometer part)
+            Nf = real_imu.shape[0]
+            real_acc = real_imu[:, :15].reshape(Nf, 5, 3)           # (N,5,3)
+            sim_acc = sim_imu_corr.cpu()[:, :15].reshape(Nf, 5, 3)  # (N,5,3)
+            per_sensor_sum_sq += ((sim_acc - real_acc) ** 2).sum(dim=0)
+            total_frames += Nf
+
+            # print breakdown for first few sequences
+            if i < 3:
+                seq_rmse = ( (sim_acc - real_acc).pow(2).mean(dim=0).sqrt() )  # (5,3)
+                print(f"Seq {i:3d} per-sensor/axis RMSE:\n{seq_rmse}")
+
             print(f"Seq {i:3d}:  mp-baseline={rmse_mp:.6f}  SimulatedIMU={rmse_corr:.6f}")
 
             total_rmse_mp   += rmse_mp
@@ -371,4 +408,10 @@ if __name__ == "__main__":
     print(f"\nMean RMSE over {n_seqs} sequences:")
     print(f"  MobilePoser-style (world frame, no gravity): {total_rmse_mp   / n_seqs:.6f}")
     print(f"  SimulatedIMU      (physical + learned):      {total_rmse_corr / n_seqs:.6f}")
+
+    # overall per-sensor/axis RMSE for accelerometer
+    if total_frames > 0:
+        per_sensor_rmse = (per_sensor_sum_sq / float(total_frames)).sqrt()
+        print("\nPer-sensor per-axis RMSE (accelerometer) shape=(5 sensors, 3 axes):")
+        print(per_sensor_rmse)
 

@@ -155,6 +155,8 @@ class SimulatedIMU(nn.Module):
         # this lets the synthesis slightly adjust sensor positions (starts at zero)
         self.sensor_vert_offsets = nn.Parameter(torch.zeros(6, 3))
 
+        # No residual MLP: only learnable physical synthesis parameters
+
     # ── helpers ────────────────────────────────────────────────────────
 
     @staticmethod
@@ -212,7 +214,8 @@ class SimulatedIMU(nn.Module):
             corrected_imu: (N, 60)
         """
         raw = self._physical_synthesis(pose_rotmat, trans, fps)
-        return raw
+        # small residual correction learned by the MLP
+        return raw 
 
 
 def train_imu_correction(
@@ -351,10 +354,16 @@ if __name__ == "__main__":
         )
 
     if os.path.exists(args.sim_checkpoint):
-        sim_imu_module.load_state_dict(
-            torch.load(args.sim_checkpoint, map_location=device)
-        )
-        print(f"Loaded SimulatedIMU from {args.sim_checkpoint}")
+        state = torch.load(args.sim_checkpoint, map_location=device)
+        load_res = sim_imu_module.load_state_dict(state, strict=False)
+        # load_state_dict returns a NamedTuple with missing_keys / unexpected_keys when strict=False
+        if hasattr(load_res, 'missing_keys') and load_res.missing_keys:
+            print("Warning: checkpoint missing keys (these params were left at their initialized values):")
+            print(load_res.missing_keys)
+        if hasattr(load_res, 'unexpected_keys') and load_res.unexpected_keys:
+            print("Warning: checkpoint contains unexpected keys:")
+            print(load_res.unexpected_keys)
+        print(f"Loaded SimulatedIMU (non-strict) from {args.sim_checkpoint}")
     sim_imu_module.eval()
 
     # ---- evaluation ----
@@ -362,6 +371,8 @@ if __name__ == "__main__":
 
     total_rmse_mp   = 0.0   # MobilePoser-style (world frame, no gravity)
     total_rmse_corr = 0.0   # SimulatedIMU: physical + learned correction
+    total_pose_angle_deg = 0.0
+    total_tran_rmse = 0.0
     n_seqs = 0
     # per-sensor/axis accumulation for accelerometer (5 sensors x 3 axes)
     per_sensor_sum_sq = torch.zeros(5, 3)
@@ -377,6 +388,10 @@ if __name__ == "__main__":
                 real_imu.unsqueeze(0), [real_imu.shape[0]]
             )
 
+            # ground-truth pose/translation from dataset
+            pose_gt_dev = pose_gt.to(pose_pred.device)
+            tran_gt_dev = tran_gt.to(tran_pred.device)
+
             # Step 2a: MobilePoser-style baseline (world frame, no gravity)
             sim_imu_mp = pose_to_imu(pose_pred, tran_pred, body_model, fps=TARGET_FPS)
 
@@ -389,7 +404,7 @@ if __name__ == "__main__":
 
             # accumulate per-sensor/axis squared error (accelerometer part)
             Nf = real_imu.shape[0]
-            real_acc = real_imu[:, :15].reshape(Nf, 5, 3)           # (N,5,3)
+            real_acc = real_imu.cpu()[:, :15].reshape(Nf, 5, 3)     # (N,5,3) 
             sim_acc = sim_imu_corr.cpu()[:, :15].reshape(Nf, 5, 3)  # (N,5,3)
             per_sensor_sum_sq += ((sim_acc - real_acc) ** 2).sum(dim=0)
             total_frames += Nf
@@ -399,7 +414,23 @@ if __name__ == "__main__":
                 seq_rmse = ( (sim_acc - real_acc).pow(2).mean(dim=0).sqrt() )  # (5,3)
                 print(f"Seq {i:3d} per-sensor/axis RMSE:\n{seq_rmse}")
 
-            print(f"Seq {i:3d}:  mp-baseline={rmse_mp:.6f}  SimulatedIMU={rmse_corr:.6f}")
+            # pose rotation error (geodesic angle in degrees)
+            # pose_pred, pose_gt_dev: (N, 24, 3, 3)
+            R_rel = torch.matmul(pose_pred.transpose(-1, -2), pose_gt_dev)
+            trace = R_rel[..., 0, 0] + R_rel[..., 1, 1] + R_rel[..., 2, 2]
+            cosval = (trace - 1.0) / 2.0
+            cosval = torch.clamp(cosval, -1.0 + 1e-7, 1.0 - 1e-7)
+            ang = torch.acos(cosval)  # radians, shape (N,24)
+            ang_deg = ang * 180.0 / 3.14159265
+            pose_angle_mean = float(ang_deg.mean().item())
+
+            # translation RMSE
+            tran_rmse = float((tran_pred - tran_gt_dev).pow(2).mean().sqrt().item())
+
+            print(f"Seq {i:3d}:  mp-baseline={rmse_mp:.6f}  SimulatedIMU={rmse_corr:.6f}  pose-angle-mean(deg)={pose_angle_mean:.3f}  tran-rmse={tran_rmse:.4f}")
+
+            total_pose_angle_deg += pose_angle_mean
+            total_tran_rmse += tran_rmse
 
             total_rmse_mp   += rmse_mp
             total_rmse_corr += rmse_corr
